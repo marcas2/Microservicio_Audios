@@ -18,13 +18,21 @@ FOCOS = [
 
 
 def determinar_categoria(data: dict) -> str:
-    cat = data.get("diagnostico", {}).get("categoria_anomalia")
-    if cat is None:
-        return "unknown"
-    elif str(cat).lower() == "normal":
-        return "normal"
-    else:
+    diagnostico = data.get("diagnostico", {})
+    categoria_anomalia = diagnostico.get("categoria_anomalia")
+    estado = diagnostico.get("estado")
+
+    if categoria_anomalia is not None:
+        if str(categoria_anomalia).strip().lower() == "normal":
+            return "normal"
         return "anormal"
+
+    if estado is not None:
+        if str(estado).strip().lower() == "normal":
+            return "normal"
+        return "anormal"
+
+    return "unknown"
 
 
 def enviar_a_local(audio_bytes: bytes, metadata: dict, categoria: str, filename: str):
@@ -60,25 +68,25 @@ async def ingest(
 
         data_base = json.loads(metadata)
 
+        if "diagnostico" not in data_base:
+            return {
+                "status": "error",
+                "message": "El JSON debe contener la clave 'diagnostico'"
+            }
+
         resultados = []
 
         for i, audio in enumerate(audios):
             foco = FOCOS[i]
 
-            # leer bytes del audio
             audio_bytes = await audio.read()
-
-            # clonar metadata base para no alterar el original
             data_audio = deepcopy(data_base)
 
-            # actualizar foco
             data_audio["diagnostico"]["foco_auscultacion"] = foco["foco_auscultacion"]
             data_audio["diagnostico"]["codigo_foco"] = foco["codigo_foco"]
 
-            # categoría según categoria_anomalia
             categoria = determinar_categoria(data_audio)
 
-            # nombre sugerido del archivo
             request_file_id = str(uuid.uuid4())
             filename = f"{request_file_id}.wav"
 
