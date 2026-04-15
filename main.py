@@ -1,29 +1,23 @@
 import uuid
 import json
-from datetime import datetime
+from copy import deepcopy
 from fastapi import FastAPI, UploadFile, File, Form
-from typing import Optional, List
+from typing import List
 import requests
 
 app = FastAPI()
 
-# URL del servidor local
 BASE_URL = "http://172.16.10.200:5002/api/upload"
 
-
-def generar_json_base():
-    return {
-        "metadata": {
-            "fecha_grabacion": datetime.now().isoformat(),
-            "origen": "auto"
-        },
-        "diagnostico": {
-            "categoria_anomalia": None
-        }
-    }
+FOCOS = [
+    {"foco_auscultacion": "Mitral", "codigo_foco": "01"},
+    {"foco_auscultacion": "Tricuspídeo", "codigo_foco": "03"},
+    {"foco_auscultacion": "Aórtico", "codigo_foco": "02"},
+    {"foco_auscultacion": "Pulmonar", "codigo_foco": "04"},
+]
 
 
-def determinar_categoria(data):
+def determinar_categoria(data: dict) -> str:
     cat = data.get("diagnostico", {}).get("categoria_anomalia")
     if cat is None:
         return "unknown"
@@ -33,13 +27,13 @@ def determinar_categoria(data):
         return "anormal"
 
 
-def enviar_a_local(audio_bytes, metadata, categoria, nombre_archivo="audio.wav"):
+def enviar_a_local(audio_bytes: bytes, metadata: dict, categoria: str, filename: str):
     files = {
-        "audio": (nombre_archivo, audio_bytes, "audio/wav")
+        "audio": (filename, audio_bytes, "audio/wav")
     }
 
     data = {
-        "metadata": json.dumps(metadata),
+        "metadata": json.dumps(metadata, ensure_ascii=False),
         "categoria": categoria
     }
 
@@ -47,71 +41,77 @@ def enviar_a_local(audio_bytes, metadata, categoria, nombre_archivo="audio.wav")
     return response.status_code, response.text
 
 
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
 @app.post("/ingest")
 async def ingest(
     audios: List[UploadFile] = File(...),
-    metadata: Optional[str] = Form(None)
+    metadata: str = Form(...)
 ):
     try:
-        # Validar que lleguen exactamente 4 archivos
         if len(audios) != 4:
             return {
                 "status": "error",
                 "message": f"Debes enviar exactamente 4 audios. Recibidos: {len(audios)}"
             }
 
-        # Metadata base
-        if metadata:
-            data_base = json.loads(metadata)
-        else:
-            data_base = generar_json_base()
+        data_base = json.loads(metadata)
 
-        categoria = determinar_categoria(data_base)
         resultados = []
 
-        for idx, audio in enumerate(audios, start=1):
-            file_id = str(uuid.uuid4())
+        for i, audio in enumerate(audios):
+            foco = FOCOS[i]
 
-            # Leer contenido del audio
+            # leer bytes del audio
             audio_bytes = await audio.read()
 
-            # Copia independiente del metadata para cada archivo
-            data_audio = json.loads(json.dumps(data_base))
-            data_audio["file_id"] = file_id
-            data_audio["indice_audio"] = idx
-            data_audio["nombre_original"] = audio.filename
+            # clonar metadata base para no alterar el original
+            data_audio = deepcopy(data_base)
 
-            # Nombre sugerido del archivo
-            extension = ".wav"
-            if audio.filename and "." in audio.filename:
-                extension = "." + audio.filename.split(".")[-1].lower()
+            # actualizar foco
+            data_audio["diagnostico"]["foco_auscultacion"] = foco["foco_auscultacion"]
+            data_audio["diagnostico"]["codigo_foco"] = foco["codigo_foco"]
 
-            nombre_archivo = f"{file_id}{extension}"
+            # categoría según categoria_anomalia
+            categoria = determinar_categoria(data_audio)
 
-            # Enviar al servidor local
-            status, resp = enviar_a_local(
+            # nombre sugerido del archivo
+            request_file_id = str(uuid.uuid4())
+            filename = f"{request_file_id}.wav"
+
+            status_code, response_text = enviar_a_local(
                 audio_bytes=audio_bytes,
                 metadata=data_audio,
                 categoria=categoria,
-                nombre_archivo=nombre_archivo
+                filename=filename
             )
 
             resultados.append({
-                "indice": idx,
-                "file_id": file_id,
+                "indice": i + 1,
                 "archivo_original": audio.filename,
-                "archivo_enviado": nombre_archivo,
+                "foco_auscultacion": foco["foco_auscultacion"],
+                "codigo_foco": foco["codigo_foco"],
                 "categoria": categoria,
-                "upload_status": status,
-                "respuesta_local": resp
+                "upload_status": status_code,
+                "respuesta_local": response_text
             })
 
         return {
             "status": "ok",
-            "cantidad_audios": len(audios),
-            "categoria": categoria,
+            "procesados": 4,
             "resultados": resultados
         }
 
+    except json.JSONDecodeError:
+        return {
+            "status": "error",
+            "message": "El campo metadata no contiene un JSON válido"
+        }
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return {
+            "status": "error",
+            "message": str(e)
+        }
