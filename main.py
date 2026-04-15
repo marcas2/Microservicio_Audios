@@ -30,9 +30,19 @@ def determinar_categoria(data):
     else:
         return "anormal"
 
-def subir_archivo(url, contenido, content_type="application/octet-stream"):
-    headers = {"Content-Type": content_type}
-    response = requests.put(url, data=contenido, headers=headers)
+def enviar_a_local(audio_bytes, metadata, categoria):
+    url = BASE_URL  # ya es /api/upload
+
+    files = {
+        "audio": ("audio.wav", audio_bytes, "audio/wav")
+    }
+
+    data = {
+        "metadata": json.dumps(metadata),
+        "categoria": categoria
+    }
+
+    response = requests.post(url, files=files, data=data)
     return response.status_code, response.text
 
 @app.post("/ingest")
@@ -63,21 +73,18 @@ async def ingest(
         audio_bytes = await audio.read()
 
         # Subir audio
-        status_audio, resp_audio = subir_archivo(audio_url, audio_bytes)
-
+        status, resp = enviar_a_local(audio_bytes, data, categoria)
         # Preparar JSON
         data["file_id"] = file_id
         json_bytes = json.dumps(data, indent=4).encode("utf-8")
 
-        # Subir JSON
-        status_json, resp_json = subir_archivo(json_url, json_bytes, "application/json")
 
         return {
             "status": "ok",
             "file_id": file_id,
             "categoria": categoria,
-            "audio_status": status_audio,
-            "json_status": status_json
+            "upload_status": status,
+            "respuesta_local": resp
         }
 
     except Exception as e:
