@@ -2,13 +2,14 @@ import uuid
 import json
 from datetime import datetime
 from fastapi import FastAPI, UploadFile, File, Form
-from typing import Optional
+from typing import Optional, List
 import requests
 
 app = FastAPI()
 
-# URL base del server local (Apache)
+# URL del servidor local
 BASE_URL = "http://172.16.10.200:5002/api/upload"
+
 
 def generar_json_base():
     return {
@@ -21,6 +22,7 @@ def generar_json_base():
         }
     }
 
+
 def determinar_categoria(data):
     cat = data.get("diagnostico", {}).get("categoria_anomalia")
     if cat is None:
@@ -30,11 +32,10 @@ def determinar_categoria(data):
     else:
         return "anormal"
 
-def enviar_a_local(audio_bytes, metadata, categoria):
-    url = BASE_URL  # ya es /api/upload
 
+def enviar_a_local(audio_bytes, metadata, categoria, nombre_archivo="audio.wav"):
     files = {
-        "audio": ("audio.wav", audio_bytes, "audio/wav")
+        "audio": (nombre_archivo, audio_bytes, "audio/wav")
     }
 
     data = {
@@ -42,49 +43,74 @@ def enviar_a_local(audio_bytes, metadata, categoria):
         "categoria": categoria
     }
 
-    response = requests.post(url, files=files, data=data)
+    response = requests.post(BASE_URL, files=files, data=data, timeout=60)
     return response.status_code, response.text
+
 
 @app.post("/ingest")
 async def ingest(
-    audio: UploadFile = File(...),
+    audios: List[UploadFile] = File(...),
     metadata: Optional[str] = Form(None)
 ):
     try:
-        file_id = str(uuid.uuid4())
+        # Validar que lleguen exactamente 4 archivos
+        if len(audios) != 4:
+            return {
+                "status": "error",
+                "message": f"Debes enviar exactamente 4 audios. Recibidos: {len(audios)}"
+            }
 
-        # JSON
+        # Metadata base
         if metadata:
-            data = json.loads(metadata)
+            data_base = json.loads(metadata)
         else:
-            data = generar_json_base()
+            data_base = generar_json_base()
 
-        categoria = determinar_categoria(data)
+        categoria = determinar_categoria(data_base)
+        resultados = []
 
-        # Nombres
-        audio_name = f"{file_id}.wav"
-        json_name = f"{file_id}.json"
+        for idx, audio in enumerate(audios, start=1):
+            file_id = str(uuid.uuid4())
 
-        # URLs destino en Apache
-        audio_url = f"{BASE_URL}/Audios/{categoria}/{audio_name}"
-        json_url = f"{BASE_URL}/audios-json/{categoria}/{json_name}"
+            # Leer contenido del audio
+            audio_bytes = await audio.read()
 
-        # Leer audio
-        audio_bytes = await audio.read()
+            # Copia independiente del metadata para cada archivo
+            data_audio = json.loads(json.dumps(data_base))
+            data_audio["file_id"] = file_id
+            data_audio["indice_audio"] = idx
+            data_audio["nombre_original"] = audio.filename
 
-        # Subir audio
-        status, resp = enviar_a_local(audio_bytes, data, categoria)
-        # Preparar JSON
-        data["file_id"] = file_id
-        json_bytes = json.dumps(data, indent=4).encode("utf-8")
+            # Nombre sugerido del archivo
+            extension = ".wav"
+            if audio.filename and "." in audio.filename:
+                extension = "." + audio.filename.split(".")[-1].lower()
 
+            nombre_archivo = f"{file_id}{extension}"
+
+            # Enviar al servidor local
+            status, resp = enviar_a_local(
+                audio_bytes=audio_bytes,
+                metadata=data_audio,
+                categoria=categoria,
+                nombre_archivo=nombre_archivo
+            )
+
+            resultados.append({
+                "indice": idx,
+                "file_id": file_id,
+                "archivo_original": audio.filename,
+                "archivo_enviado": nombre_archivo,
+                "categoria": categoria,
+                "upload_status": status,
+                "respuesta_local": resp
+            })
 
         return {
             "status": "ok",
-            "file_id": file_id,
+            "cantidad_audios": len(audios),
             "categoria": categoria,
-            "upload_status": status,
-            "respuesta_local": resp
+            "resultados": resultados
         }
 
     except Exception as e:
