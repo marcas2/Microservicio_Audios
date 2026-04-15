@@ -1,6 +1,4 @@
-import uuid
 import json
-from copy import deepcopy
 from fastapi import FastAPI, UploadFile, File, Form
 from typing import List, Optional
 import requests
@@ -9,12 +7,6 @@ app = FastAPI()
 
 BASE_URL = "http://172.16.10.200:5002/api/upload"
 
-FOCOS = [
-    {"foco_auscultacion": "Mitral", "codigo_foco": "01"},
-    {"foco_auscultacion": "Tricuspídeo", "codigo_foco": "03"},
-    {"foco_auscultacion": "Aórtico", "codigo_foco": "02"},
-    {"foco_auscultacion": "Pulmonar", "codigo_foco": "04"},
-]
 
 def determinar_categoria(data: dict) -> str:
     diagnostico = data.get("diagnostico", {})
@@ -33,9 +25,37 @@ def determinar_categoria(data: dict) -> str:
 
     return "unknown"
 
-def enviar_a_local(audio_bytes: bytes, metadata: dict, categoria: str, filename: str):
+
+def enviar_a_local(
+    audio_principal_bytes: bytes,
+    audio_ecg_bytes: bytes,
+    audio_ecg_1_bytes: bytes,
+    audio_ecg_2_bytes: bytes,
+    metadata: dict,
+    categoria: str,
+    original_names: dict
+):
     files = {
-        "audio": (filename, audio_bytes, "audio/wav")
+        "audio_principal": (
+            original_names["audio_principal"],
+            audio_principal_bytes,
+            "audio/wav"
+        ),
+        "audio_ecg": (
+            original_names["audio_ecg"],
+            audio_ecg_bytes,
+            "audio/wav"
+        ),
+        "audio_ecg_1": (
+            original_names["audio_ecg_1"],
+            audio_ecg_1_bytes,
+            "audio/wav"
+        ),
+        "audio_ecg_2": (
+            original_names["audio_ecg_2"],
+            audio_ecg_2_bytes,
+            "audio/wav"
+        )
     }
 
     data = {
@@ -43,12 +63,14 @@ def enviar_a_local(audio_bytes: bytes, metadata: dict, categoria: str, filename:
         "categoria": categoria
     }
 
-    response = requests.post(BASE_URL, files=files, data=data, timeout=60)
+    response = requests.post(BASE_URL, files=files, data=data, timeout=120)
     return response.status_code, response.text
+
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
 
 @app.post("/ingest")
 async def ingest(
@@ -71,51 +93,38 @@ async def ingest(
         else:
             return {
                 "status": "error",
-                "message": "Debes enviar metadata como texto o metadata_file como archivo JSON"
+                "message": "Debes enviar metadata o metadata_file"
             }
 
-        if "diagnostico" not in data_base:
-            return {
-                "status": "error",
-                "message": "El JSON debe contener la clave 'diagnostico'"
-            }
+        categoria = determinar_categoria(data_base)
 
-        resultados = []
+        audio_principal_bytes = await audios[0].read()
+        audio_ecg_bytes = await audios[1].read()
+        audio_ecg_1_bytes = await audios[2].read()
+        audio_ecg_2_bytes = await audios[3].read()
 
-        for i, audio in enumerate(audios):
-            foco = FOCOS[i]
-            audio_bytes = await audio.read()
-            data_audio = deepcopy(data_base)
+        original_names = {
+            "audio_principal": audios[0].filename or "audio_principal.wav",
+            "audio_ecg": audios[1].filename or "audio_ecg.wav",
+            "audio_ecg_1": audios[2].filename or "audio_ecg_1.wav",
+            "audio_ecg_2": audios[3].filename or "audio_ecg_2.wav"
+        }
 
-            data_audio["diagnostico"]["foco_auscultacion"] = foco["foco_auscultacion"]
-            data_audio["diagnostico"]["codigo_foco"] = foco["codigo_foco"]
-
-            categoria = determinar_categoria(data_audio)
-
-            request_file_id = str(uuid.uuid4())
-            filename = f"{request_file_id}.wav"
-
-            status_code, response_text = enviar_a_local(
-                audio_bytes=audio_bytes,
-                metadata=data_audio,
-                categoria=categoria,
-                filename=filename
-            )
-
-            resultados.append({
-                "indice": i + 1,
-                "archivo_original": audio.filename,
-                "foco_auscultacion": foco["foco_auscultacion"],
-                "codigo_foco": foco["codigo_foco"],
-                "categoria": categoria,
-                "upload_status": status_code,
-                "respuesta_local": response_text
-            })
+        status_code, response_text = enviar_a_local(
+            audio_principal_bytes=audio_principal_bytes,
+            audio_ecg_bytes=audio_ecg_bytes,
+            audio_ecg_1_bytes=audio_ecg_1_bytes,
+            audio_ecg_2_bytes=audio_ecg_2_bytes,
+            metadata=data_base,
+            categoria=categoria,
+            original_names=original_names
+        )
 
         return {
             "status": "ok",
-            "procesados": 4,
-            "resultados": resultados
+            "categoria": categoria,
+            "upload_status": status_code,
+            "respuesta_local": response_text
         }
 
     except json.JSONDecodeError:
