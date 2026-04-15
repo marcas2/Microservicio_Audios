@@ -2,7 +2,7 @@ import uuid
 import json
 from copy import deepcopy
 from fastapi import FastAPI, UploadFile, File, Form
-from typing import List
+from typing import List, Optional
 import requests
 
 app = FastAPI()
@@ -15,7 +15,6 @@ FOCOS = [
     {"foco_auscultacion": "Aórtico", "codigo_foco": "02"},
     {"foco_auscultacion": "Pulmonar", "codigo_foco": "04"},
 ]
-
 
 def determinar_categoria(data: dict) -> str:
     diagnostico = data.get("diagnostico", {})
@@ -34,7 +33,6 @@ def determinar_categoria(data: dict) -> str:
 
     return "unknown"
 
-
 def enviar_a_local(audio_bytes: bytes, metadata: dict, categoria: str, filename: str):
     files = {
         "audio": (filename, audio_bytes, "audio/wav")
@@ -48,16 +46,15 @@ def enviar_a_local(audio_bytes: bytes, metadata: dict, categoria: str, filename:
     response = requests.post(BASE_URL, files=files, data=data, timeout=60)
     return response.status_code, response.text
 
-
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
-
 @app.post("/ingest")
 async def ingest(
     audios: List[UploadFile] = File(...),
-    metadata: str = Form(...)
+    metadata: Optional[str] = Form(None),
+    metadata_file: Optional[UploadFile] = File(None)
 ):
     try:
         if len(audios) != 4:
@@ -66,7 +63,16 @@ async def ingest(
                 "message": f"Debes enviar exactamente 4 audios. Recibidos: {len(audios)}"
             }
 
-        data_base = json.loads(metadata)
+        if metadata_file is not None:
+            raw = await metadata_file.read()
+            data_base = json.loads(raw.decode("utf-8"))
+        elif metadata is not None:
+            data_base = json.loads(metadata)
+        else:
+            return {
+                "status": "error",
+                "message": "Debes enviar metadata como texto o metadata_file como archivo JSON"
+            }
 
         if "diagnostico" not in data_base:
             return {
@@ -78,7 +84,6 @@ async def ingest(
 
         for i, audio in enumerate(audios):
             foco = FOCOS[i]
-
             audio_bytes = await audio.read()
             data_audio = deepcopy(data_base)
 
@@ -116,7 +121,7 @@ async def ingest(
     except json.JSONDecodeError:
         return {
             "status": "error",
-            "message": "El campo metadata no contiene un JSON válido"
+            "message": "El metadata no contiene un JSON válido"
         }
     except Exception as e:
         return {
